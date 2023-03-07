@@ -1,0 +1,181 @@
+---
+title: "covid_cases"
+author: "Ken Ishida"
+date: "2023-03-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Imported Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(reshape)
+library(lubridate)
+library(forecast)
+```
+
+
+```{r}
+confirmed_us <- read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv?raw=true")
+confirmed_global <- read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv?raw=true")
+deaths_us <- read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv?raw=true")
+deaths_global <- read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv?raw=true")
+recovered_global <- read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv?raw=true")
+```
+
+# Uplifting analysis
+I'd like to focus on the recovery rate, so I'll try merging recoveries and confirmations.
+
+```{r}
+head(recovered_global)
+```
+
+
+# Data profiling
+
+For most files, it looks like each X axis entry is a date, and the rows represent a city and state. The same appears for all other "US" files, so that will be handy in creating types of map visuals.
+The global data only shows countries, along with latitude and longitude coordinates. The dates are similarly set out as X-prefixed MM.DD.YY format date strings.
+
+
+```{r}
+head(recovered_global)
+recovered_global_melt <- 
+  melt(
+    recovered_global[!names(recovered_global) %in% c("Province.State", "Lat", "Long")], 
+    c("Country.Region"), 
+    value.name="Recovered"
+    )
+head(recovered_global_melt)
+
+colnames(recovered_global_melt) <- 
+  c("Country.Region", "XDate", "Recovered")
+
+show(recovered_global_melt)
+```
+
+# Tidying up the dates and adding more dimensions
+
+I think it would be best to tidy up these dates, and probably merge everything into one dataframe with different column names to make things easier.
+
+```{r}
+recovered_global_melt$DATE <- mdy(gsub("X", "", recovered_global_melt$XDate))
+recovered_global_melt$MONTH <- month(recovered_global_melt$DATE)
+recovered_global_melt$YEAR <- year(recovered_global_melt$DATE)
+
+show(recovered_global_melt)
+
+recovered_global_gb <- 
+  recovered_global_melt %>% 
+  group_by(DATE) %>%
+  summarise(TOTAL = sum(Recovered))
+
+ggplot(recovered_global_gb, aes(DATE, TOTAL)) +
+  geom_line() + 
+  scale_y_continuous(labels=function(l) {
+    trans=l / 1000000;
+    paste0(trans, "M")
+  }
+  )
+# Sharp drop-off in the middle of 2021 it seems? I guess they stopped collecting recovery data.
+# Maybe it stopped being interesting?
+# Filtering by 0 values shows the zeros started showing up in 2021-08-05.
+```
+
+# Data Collection Stoppage
+Interestingly, they seem to have stopped collecting global data after 2021-8-05. I wonder why?
+Maybe the recovery rate stabilized or got to such a level that it was no longer a concern? Only way to find out is by comparing the confirmed cases and the recovered cases to see if recoveries increased as a proportion of confirmed cases.
+
+
+```{r}
+# start by melting the confirmed_global the same way recovered_global was melted
+head(confirmed_global)
+confirmed_global_melt <-
+  melt(
+    confirmed_global[!names(confirmed_global) %in% c("Province.State", "Lat", "Long")],
+    c("Country.Region"),
+    value.name="Confirmed"
+    ) 
+show(confirmed_global_melt)
+colnames(confirmed_global_melt) <- 
+  c("Country.Region", "XDate", "Confirmed") 
+confirmed_global_melt <- # removing the province.state
+  select(confirmed_global_melt, c("Country.Region", "XDate", "Confirmed"))
+confirmed_global_melt$DATE <- mdy(gsub("X", "", confirmed_global_melt$XDate))
+
+head(confirmed_global_melt)
+ggplot(confirmed_global_melt, aes(DATE, Confirmed)) +
+  geom_line(aes(color='red')) + 
+  scale_color_manual(labels = c("Confirmed Cases"), values = c("red"))
+  scale_y_continuous(labels=function(l) {
+    trans=l / 1000000;
+    paste0(trans, "M")
+  }
+  )
+```
+
+```{r}
+show(select(confirmed_global_melt, c("XDate", "Country.Region", "Confirmed")))
+show(select(recovered_global_melt, c("XDate", "Country.Region", "Recovered")))
+recovered_confirmed <- 
+  merge(
+    x=select(confirmed_global_melt, c("DATE", "Country.Region", "Confirmed")),
+    y=select(recovered_global_melt, c("DATE", "Country.Region", "Recovered")),
+    by=c('DATE', 'Country.Region'), all.x=TRUE
+  )
+
+recovered_confirmed <- filter(recovered_confirmed, Recovered > 0)
+
+head(recovered_confirmed)
+
+ggplot(recovered_confirmed, aes(x=DATE)) +
+  geom_line(aes(y=Confirmed, color='red')) + 
+  scale_color_manual(labels = c("Confirmed"), values = c("red"))
+```
+
+# Modeling for ARIMA
+
+In order to model this data for ARIMA analysis, I would need to figure out how many confirmed cases there are a day. With that, we could forecast the growth or shrink based on the number of confirmations per time period.
+
+```{r}
+
+aggregate_recoveries <- 
+  group_by(recovered_global_melt, DATE) %>%
+  summarise(TOTAL_RECOVERIES=sum(Recovered))
+
+head(aggregate_recoveries)
+
+lag_recovered_global_melt <- 
+  mutate(
+    aggregate_recoveries, 
+    previous_day = lag(TOTAL_RECOVERIES, order_by=DATE)
+    )
+
+head(lag_recovered_global_melt)
+
+lag_recovered_global_melt$RECOVERIES_THIS_DAY <- 
+  lag_recovered_global_melt$TOTAL_RECOVERIES - lag_recovered_global_melt$previous_day
+
+show(filter(lag_recovered_global_melt, RECOVERIES_THIS_DAY > 0))
+```
+
+```{r}
+ar <- select(lag_recovered_global_melt, c(DATE, RECOVERIES_THIS_DAY))
+show(ar)
+arima_model <- auto.arima(ar[,1])
+fc <- forecast(arima_model, level=c(95), h=10*12)
+plot(fc)
+```
+
+# Model
+
+It seems my data model is capable of predicting, but perhaps needs work on the shape of the data, specifically ensuring that the recoveries per day did not introduce null values at some point. All in all, very interesting experience.
+
+# Identification of Bias
+
+From the visuals, it's easy to assume that the spikes during winter are "natural" or expected, but I wonder if there's anything specifically driving the observed increases, or how they differ from the more modest increases in confirmed cases during summer months? Is there actually a modest increase at all, or is it a trick of the visual? All news outlets have been talking about this illness for so long that it's difficult to split off what is known versus observations garnered from data analysis. In order to eliminate bias, I have to consciously remember to not seek outside information or assume things based on a supposed trend in the data.
+
