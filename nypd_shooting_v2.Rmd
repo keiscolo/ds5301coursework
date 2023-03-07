@@ -1,0 +1,192 @@
+---
+title: "police_shooting"
+output:
+  html_document:
+    df_print: paged
+date: "2023-03-05"
+---
+
+
+---
+
+## *Reading in data*
+```{r}
+df <- read.csv("NYPD_Shooting_Incident_Data__Historic_.csv")
+head(df)
+```
+
+---
+
+## *Tidying up the data*
+
+I'll remove extraneous columns, like all of the latitude longitude info that is a duplicate of the other stand-alone columns.
+
+
+``` {r, echo=FALSE, warn=FALSE, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(chron)
+library(tidyverse)
+library(ggplot2)
+library(ggmap)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+```
+
+
+```{r}
+colSums(is.na(df))
+```
+
+```{r, echo=FALSE}
+df <- df %>% mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+head(df)
+```
+
+---
+
+# Data Summary
+``` {r}
+summary(df)
+```
+# Extracting dimensions
+From the existing data, I will extract additional dimensions to help with further analysis of the data.
+
+```{r}
+df$OCCUR_TIME_FMT <- strptime(df$OCCUR_TIME, "%H:%M:%S", tz="EST")
+df$HOUR <- as.numeric(substr(df$OCCUR_TIME, start=1, stop=2))
+df$MONTH <- as.numeric(format(as.Date(df$OCCUR_DATE, format="%Y-%m-%d"), "%m"))
+df$YEAR <- as.numeric(format(as.Date(df$OCCUR_DATE, format="%Y-%m-%d"), "%Y"))
+```
+
+# Answering questions
+- How often do gun crimes result in murder?
+- Is there any correlation between murder and date or time?
+- Is there any correlation between non-murder gun crimes and date or time?
+- How does location affect gun crime? 
+-- Which area has the most gun crime in general?
+-- Which has the most non-murder gun crime?
+-- Which has the most murder-flagged gun crime?
+
+```{r}
+# how often do gun crimes result in murder?
+murder_vs_non <- df %>%
+  group_by(YEAR, STATISTICAL_MURDER_FLAG) %>%
+  summarise(TOTAL=n())
+show(murder_vs_non)
+ggplot(murder_vs_non, aes(x=YEAR, y=TOTAL, fill=STATISTICAL_MURDER_FLAG)) +  
+  geom_bar(position="dodge", stat="identity") +
+  scale_fill_discrete(labels=c('Not Murder', 'Murder')) + 
+  ggtitle("Gun Crime by Murder Flag over Time") +
+  labs(fill="Crime Type")
+```
+
+```{r}
+ratio_df <- murder_vs_non %>% pivot_wider(names_from=STATISTICAL_MURDER_FLAG, values_from=TOTAL)
+ratio_df$TOTAL <- (ratio_df$true + ratio_df$false)
+ratio_df$RATIO <- (ratio_df$true / ratio_df$TOTAL) * 100
+show(ratio_df)
+
+ggplot(ratio_df) + 
+  geom_line(aes(x=YEAR, y=RATIO), color = 'blue') +
+  ggtitle("Gun Crime to Murder Ratio")
+```
+
+
+```{r}
+gb <- df %>%
+  group_by(MONTH, HOUR) %>%
+  summarize(count_by_month = n())
+piv_mtrx <- gb %>% pivot_wider(names_from=MONTH, values_from=count_by_month)
+show(gb)
+```
+
+
+```{r}
+ggplot(
+  gb, 
+  mapping=aes(
+    x=MONTH, 
+    y=HOUR,
+    fill=count_by_month
+    )
+  ) + geom_tile()+
+  scale_fill_gradient(low='white', high='red') +
+  ggtitle("Count of Incidents by Month and Hour of the Day")
+```
+
+
+```{r, figures-side, fig.show="hold", out.width="50%"}
+
+by_hour <- df %>% group_by(MONTH) %>%
+  summarize(count_by_month = n())
+
+by_month <- df %>% group_by(MONTH) %>%
+  summarize(count_by_month = n())
+
+#show(by_hour)
+
+barplot(table(df$HOUR))
+barplot(table(df$MONTH))
+
+```
+```{r}
+ggmap::register_google()
+```
+
+
+```{r}
+ymax = max(df$Latitude)
+ymin = min(df$Latitude)
+xmax = max(df$Longitude) # these are backwards because negatives
+xmin = min(df$Longitude)
+murders <- filter(df, STATISTICAL_MURDER_FLAG == "true")
+murders <- murders %>% select('Latitude', 'Longitude')
+non_murders <- non_murders %>% select('Latitude', 'Longitude')
+non_murders <- filter(df, STATISTICAL_MURDER_FLAG == "false")
+world <- ne_countries(scale = "medium", returnclass = "sf")
+ggplot(data = world) + 
+  geom_sf() +
+  geom_point(data=murders, aes(x=Longitude, y=Latitude), color='red') +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand=FALSE) +
+  ggtitle("Murders overlay Map")
+
+ggplot(data = world) + 
+  geom_sf() +
+  geom_point(data=non_murders, aes(x=Longitude, y=Latitude), color='blue') +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand=FALSE) +
+  ggtitle("Non-Murder Overlay Map")
+
+```
+
+```{r}
+age_grps <- filter(df, !is.null(PERP_AGE_GROUP))
+age_grps <- filter(df, 
+                   !PERP_AGE_GROUP == "224" &
+                   !PERP_AGE_GROUP == "940" &
+                   !PERP_AGE_GROUP == "1020" &
+                   !PERP_AGE_GROUP == ""
+                   )
+
+age_grps <- age_grps %>%
+  group_by(PERP_AGE_GROUP, VIC_AGE_GROUP) %>%
+  summarise(COUNT=n())
+
+show(age_grps)
+
+ggplot(
+  age_grps, 
+  mapping=aes(
+    x=VIC_AGE_GROUP, 
+    y=PERP_AGE_GROUP,
+    fill=COUNT
+    )
+  ) + geom_tile() +
+  scale_fill_gradient(low='white', high='red') +
+  xlab("Victim Age Group") +
+  ylab("Perpretrator Age Group") +
+  ggtitle("Perpetration/Victim Age Group Interaction Matrix")
+```
+
